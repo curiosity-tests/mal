@@ -1,8 +1,25 @@
 name: Build and Test
 
+# racecar fork-testbed patch. Changes from upstream:
+#   1. workflow_dispatch gains leg/profile/racecar_run inputs alongside upstream's
+#      impls/self-hosted, so racecar can drive a run and select the arm.
+#   2. actions/checkout -> crashappsec/action-checkout in the linux job, which
+#      wraps checkout and setup-chalk-action together (the internal pattern, cf.
+#      dummy-deployments). `chalk:` is the single variable separating the arms.
+#      get-matrix keeps plain actions/checkout: it only runs get-ci-matrix.py and
+#      is not part of what we are measuring.
+#   3. permissions gains id-token: write for the action's OIDC connect (upstream's
+#      contents: read / packages: write are restated, since a permissions block
+#      zeroes every unlisted scope).
+#   4. A fail-closed assertion on the instrumented arm.
+#   5. The macos (macos-12) and windows (windows-2022) jobs are removed: build
+#      observables are linux-only, so those legs cannot be instrumented.
+# Build and test COMMANDS are byte-identical to upstream.
+
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 on:
   push: {}
@@ -18,6 +35,26 @@ on:
         required: true
         default: 'yes'
         options: ['yes', 'no']
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
+
+run-name: "Build and Test ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
+
+env:
+  # The one variable that separates the arms. On baseline, action-checkout skips
+  # its Set up Chalk step entirely: no chalk, no curiosity, no residue.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
 
 jobs:
   get-matrix:
@@ -25,10 +62,6 @@ jobs:
     outputs:
       do-linux: ${{ steps.get-matrix-step.outputs.do_linux }}
       matrix-linux: ${{ steps.get-matrix-step.outputs.linux }}
-      do-macos: ${{ steps.get-matrix-step.outputs.do_macos }}
-      matrix-macos: ${{ steps.get-matrix-step.outputs.macos }}
-      do-windows: ${{ steps.get-matrix-step.outputs.do_windows }}
-      matrix-windows: ${{ steps.get-matrix-step.outputs.windows }}
     steps:
       - uses: actions/checkout@v4
       - id: files
@@ -50,9 +83,28 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.get-matrix.outputs.matrix-linux) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: crashappsec/action-checkout@main
         with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          # Default is best-effort; a silently-uninstrumented run is a corrupt
+          # data point rather than a degraded one, so fail closed.
+          observables_continue_on_error: false
+          # Upstream used actions/checkout, which does not fetch LFS. Keep the
+          # tree identical to what upstream CI builds.
+          lfs: false
           fetch-depth: 0  # Need full history for voom like versions
+
+      # Assert on the host-server socket, NOT on LD_PRELOAD: co-monitor's loader
+      # clears LD_PRELOAD once it has injected so it does not cascade into every
+      # child, so an empty LD_PRELOAD is what SUCCESS looks like from inside the
+      # shell. Process name is no good either -- co-hostd daemonizes.
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -81,115 +133,6 @@ jobs:
           ./ci.sh perf ${IMPL}
       - name: Self-hosted Tests
         if: ${{ github.event.inputs.self-hosted != 'no' }}
-        run: |
-          export ${{ matrix.IMPL }}
-          if [ -n "${NO_SELF_HOST:-}" ]; then
-            echo "Skipping self-host for ${IMPL} due to NO_SELF_HOST variable"
-          else
-            DO_SELF_HOST=1 ./ci.sh test ${IMPL}
-            # Check that self-hosted mode really ran
-            [ "`grep -a "mal-user>" test-mal-*${IMPL}.debug | wc -l`" -gt 800 ]
-          fi
-      - name: Print debug log
-        if: failure()
-        run: cat *.debug
-      - name: Archive logs and debug output
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs.${{ matrix.IMPL }}
-          path: |
-            *.log
-            *.debug
-
-  macos:
-    needs: get-matrix
-    if: ${{ needs.get-matrix.outputs.do-macos == 'true' }}
-    runs-on: macos-12
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.get-matrix.outputs.matrix-macos) }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: |
-          export ${{ matrix.IMPL }}
-          ./ci.sh build ${IMPL}
-      - name: Step Tests
-        run: |
-          export ${{ matrix.IMPL }}
-          ./ci.sh test ${IMPL}
-      - name: Regression Tests
-        run: |
-          export ${{ matrix.IMPL }}
-          STEP=stepA REGRESS=1 HARD=1 OPTIONAL=0 ./ci.sh test ${IMPL}
-      - name: Performance Tests
-        run: |
-          export ${{ matrix.IMPL }}
-          ./ci.sh perf ${IMPL}
-      - name: Self-hosted Tests
-        if: ${{ github.event.inputs.self-hosted != 'no' }}
-        run: |
-          export ${{ matrix.IMPL }}
-          if [ -n "${NO_SELF_HOST:-}" ]; then
-            echo "Skipping self-host for ${IMPL} due to NO_SELF_HOST variable"
-          else
-            DO_SELF_HOST=1 ./ci.sh test ${IMPL}
-            # Check that self-hosted mode really ran
-            [ "`grep -a "mal-user>" test-mal-*${IMPL}.debug | wc -l`" -gt 800 ]
-          fi
-      - name: Print debug log
-        if: failure()
-        run: cat *.debug
-      - name: Archive logs and debug output
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs.${{ matrix.IMPL }}
-          path: |
-            *.log
-            *.debug
-
-  windows:
-    needs: get-matrix
-    if: ${{ needs.get-matrix.outputs.do-windows == 'true' }}
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.get-matrix.outputs.matrix-windows) }}
-    steps:
-      - uses: Vampire/setup-wsl@v3
-        with:
-            distribution: Ubuntu-24.04
-      - name: Install requirements for WSL
-        shell: wsl-bash {0}
-        run: |
-          sudo apt update -y
-          sudo apt install make -y
-          sudo apt install python3 -y
-          sudo ln -s /usr/bin/python3 /usr/bin/python
-      - uses: actions/checkout@v4
-      - name: Build
-        shell: wsl-bash {0}
-        run: |
-          export ${{ matrix.IMPL }}
-          ./ci.sh build ${IMPL}
-      - name: Step Tests
-        shell: wsl-bash {0}
-        run: |
-          export ${{ matrix.IMPL }}
-          ./ci.sh test ${IMPL}
-      - name: Regression Tests
-        shell: wsl-bash {0}
-        run: |
-          export ${{ matrix.IMPL }}
-          STEP=stepA REGRESS=1 HARD=1 OPTIONAL=0 ./ci.sh test ${IMPL}
-      - name: Performance Tests
-        shell: wsl-bash {0}
-        run: |
-          export ${{ matrix.IMPL }}
-          ./ci.sh perf ${IMPL}
-      - name: Self-hosted Tests
-        if: ${{ github.event.inputs.self-hosted != 'no' }}
-        shell: wsl-bash {0}
         run: |
           export ${{ matrix.IMPL }}
           if [ -n "${NO_SELF_HOST:-}" ]; then
