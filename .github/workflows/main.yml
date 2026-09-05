@@ -27,9 +27,17 @@ on:
   workflow_dispatch:
     inputs:
       impls:
+        # Scoping, NOT fidelity: upstream defaults this to 'all', which is 112
+        # Linux jobs x 6 heavy steps and would monopolise the shared runner pool
+        # for hours. Trimmed to a representative 12 spanning native-compiled
+        # (c, cpp, go, rust, haskell), VM/JIT (java, cs, js) and interpreted
+        # (python3, ruby, perl, lua). Each name maps to exactly one IMPLS.yml
+        # entry, so this is 12 jobs. Both arms use the same subset, so the
+        # instrumented/baseline ratio is unaffected. Pass 'all' explicitly to
+        # get the full matrix back.
         description: 'Space separated list of impls to test (or all)'
         required: true
-        default: 'all'
+        default: 'c cpp go rust haskell java cs js python3 ruby perl lua'
       self-hosted:
         description: 'Include self-hosted tests'
         required: true
