@@ -150,6 +150,28 @@ jobs:
             # Check that self-hosted mode really ran
             [ "`grep -a "mal-user>" test-mal-*${IMPL}.debug | wc -l`" -gt 800 ]
           fi
+      # TEMPORARY DIAGNOSTIC -- REMOVE AFTER ANSWERING. Does curiosity's wrapped
+      # runc actually observe execs *inside* mal's build containers, or only the
+      # host-side docker client? Discriminator: ci.sh bind-mounts the workspace
+      # at /mal inside the container, whereas on the host it is
+      # /home/runner/work/mal/mal -- so any path under /mal/ can only have been
+      # seen from inside a container. Summarised, not dumped.
+      - name: Probe observables for in-container execs
+        if: env.CHALK_ON == 'true'
+        run: |
+          obs="${CURIOSITY_ROOT}/observables"
+          echo "streams: $(ls "$obs"/*_events.jsonl 2>/dev/null | wc -l)"
+          grep -ohE '"/[A-Za-z0-9_./+-]+"' "$obs"/*_events.jsonl 2>/dev/null \
+            | tr -d '"' | sort -u > /tmp/paths.txt || true
+          echo "distinct absolute paths: $(wc -l < /tmp/paths.txt)"
+          echo "--- container-only (/mal/...) ---"
+          grep -c '^/mal/' /tmp/paths.txt || echo 0
+          grep '^/mal/' /tmp/paths.txt | head -20
+          echo "--- go toolchain ---"
+          grep -E '/(go|compile|link|asm|gofmt)$|/go/|go-build' /tmp/paths.txt | head -20
+          echo "--- host docker client ---"
+          grep -E '/docker$|/runc$' /tmp/paths.txt | head -10
+
       - name: Print debug log
         if: failure()
         run: cat *.debug
