@@ -62,7 +62,7 @@ run-name: "Build and Test ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 env:
   # The one variable that separates the arms. On baseline, action-checkout skips
   # its Set up Chalk step entirely: no chalk, no curiosity, no residue.
-  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+  CHALK_ON: ${{ inputs.leg == 'instrumented' }}
 
 jobs:
   get-matrix:
@@ -73,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: files
-        if: ${{ github.event_name != 'workflow_dispatch' }}
+        if: ${{ 'push' != 'workflow_dispatch' }}
         uses: kanaka/get-changed-files@v4
         with:
           default-base: master
