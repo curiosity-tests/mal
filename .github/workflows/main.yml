@@ -73,7 +73,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: files
-        if: ${{ 'push' != 'workflow_dispatch' }}
+        # Upstream's own guard, restored verbatim. get-changed-files hard-errors
+        # unless the payload is a push or pull_request, so it must stay skipped
+        # on the dispatch racecar drives; the matrix then comes from
+        # OVERRIDE_IMPLS below. This is the one place where the event name is
+        # load-bearing rather than arm selection, so it is not folded to a
+        # literal.
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: kanaka/get-changed-files@v4
         with:
           default-base: master
